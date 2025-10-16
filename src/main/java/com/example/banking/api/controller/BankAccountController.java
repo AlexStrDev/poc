@@ -44,10 +44,10 @@ public class BankAccountController {
                 .body("Error: " + ex.getMessage()));
     }
 
-    // Depositar dinero
+    // Depositar dinero - AGREGADO EL NOMBRE DEL PARÁMETRO
     @PostMapping("/{accountId}/deposit")
     public CompletableFuture<ResponseEntity<String>> deposit(
-            @PathVariable String accountId,
+            @PathVariable("accountId") String accountId,
             @RequestBody TransactionDTO dto) {
         
         DepositMoneyCommand command = new DepositMoneyCommand(accountId, dto.getAmount());
@@ -58,10 +58,10 @@ public class BankAccountController {
                 .body("Error: " + ex.getMessage()));
     }
 
-    // Retirar dinero
+    // Retirar dinero - AGREGADO EL NOMBRE DEL PARÁMETRO
     @PostMapping("/{accountId}/withdraw")
     public CompletableFuture<ResponseEntity<String>> withdraw(
-            @PathVariable String accountId,
+            @PathVariable("accountId") String accountId,
             @RequestBody TransactionDTO dto) {
         
         WithdrawMoneyCommand command = new WithdrawMoneyCommand(accountId, dto.getAmount());
@@ -72,9 +72,10 @@ public class BankAccountController {
                 .body("Error: " + ex.getMessage()));
     }
 
-    // Consultar balance de una cuenta
+    // Consultar balance de una cuenta - AGREGADO EL NOMBRE DEL PARÁMETRO
     @GetMapping("/{accountId}")
-    public ResponseEntity<AccountResponseDTO> getAccount(@PathVariable String accountId) {
+    public ResponseEntity<AccountResponseDTO> getAccount(
+            @PathVariable("accountId") String accountId) {
         return projection.findById(accountId)
             .map(account -> ResponseEntity.ok(new AccountResponseDTO(
                 account.getAccountId(),

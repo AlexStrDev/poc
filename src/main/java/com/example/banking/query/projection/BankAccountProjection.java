@@ -26,7 +26,8 @@ public class BankAccountProjection {
             event.getOwner(),
             event.getInitialBalance()
         );
-        repository.save(account);
+        System.out.println("Account created (llego al projection): " + account);
+        // repository.save(account);
     }
 
     // Maneja el evento de dinero depositado
@@ -36,7 +37,7 @@ public class BankAccountProjection {
         if (accountOpt.isPresent()) {
             BankAccount account = accountOpt.get();
             account.setBalance(account.getBalance() + event.getAmount());
-            repository.save(account);
+            // repository.save(account);
         }
     }
 
@@ -47,7 +48,7 @@ public class BankAccountProjection {
         if (accountOpt.isPresent()) {
             BankAccount account = accountOpt.get();
             account.setBalance(account.getBalance() - event.getAmount());
-            repository.save(account);
+            // repository.save(account);
         }
     }
 

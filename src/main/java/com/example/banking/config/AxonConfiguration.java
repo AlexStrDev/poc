@@ -92,10 +92,20 @@ public class AxonConfiguration {
 
     /**
      * Configuración del procesamiento de eventos
+     * 
+     * CAMBIO IMPORTANTE:
+     * - Usamos SUBSCRIBING processors en lugar de TRACKING
+     * - Los Subscribing processors son más apropiados para integraciones con Kafka
+     * - Kafka ya maneja el tracking de offsets
+     * - No requieren TrackingToken implementation
      */
     @org.springframework.beans.factory.annotation.Autowired
     public void configureEventProcessing(EventProcessingConfigurer configurer) {
-        // Usar tracking event processors (por defecto)
-        configurer.usingTrackingEventProcessors();
+        // Cambiar a Subscribing Event Processors para todos los procesadores
+        configurer.usingSubscribingEventProcessors();
+        
+        // Opcionalmente, puedes configurar procesadores específicos:
+        // configurer.registerSubscribingEventProcessor("com.example.banking.query.projection");
+        // configurer.registerSubscribingEventProcessor("com.example.banking.infrastructure.logging");
     }
 }

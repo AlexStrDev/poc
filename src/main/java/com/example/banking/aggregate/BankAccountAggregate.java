@@ -32,7 +32,7 @@ public class BankAccountAggregate {
         if (command.getInitialBalance() < 0) {
             throw new IllegalArgumentException("El balance inicial no puede ser negativo");
         }
-        System.out.println("Creando cuenta para::::::::: " );
+        System.out.println("Creando cuenta para: " + command.getOwner());
 
         AccountCreatedEvent event = new AccountCreatedEvent(
             command.getAccountId(),

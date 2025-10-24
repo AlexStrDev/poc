@@ -31,19 +31,27 @@ dependencies {
     // Axon Framework
     implementation 'org.axonframework:axon-spring-boot-starter:4.9.1'
     
-    implementation "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    // Kafka
+    implementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
     implementation 'org.springframework.kafka:spring-kafka'
     
-    // Base de datos H2 (en memoria)
-    runtimeOnly 'com.h2database:h2'
+    // PostgreSQL
+    implementation 'org.postgresql:postgresql:42.7.1'
     
-    // Lombok (opcional pero útil)
+    // Jackson para serialización JSON
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+    // Lombok
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
     
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.axonframework:axon-test:4.9.1'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
 }
 
 tasks.named('test') {

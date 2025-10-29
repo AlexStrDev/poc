@@ -54,7 +54,7 @@ public class BankAccountController {
 
     @PostMapping("/{accountId}/deposit")
     public CompletableFuture<ResponseEntity<String>> deposit(
-            @PathVariable String accountId,
+            @PathVariable("accountId") String accountId,
             @RequestBody TransactionRequest request) {
         
         log.info("Depositando {} en cuenta {}", request.getAmount(), accountId);
@@ -75,7 +75,7 @@ public class BankAccountController {
 
     @PostMapping("/{accountId}/withdraw")
     public CompletableFuture<ResponseEntity<String>> withdraw(
-            @PathVariable String accountId,
+            @PathVariable("accountId") String accountId,
             @RequestBody TransactionRequest request) {
         
         log.info("Retirando {} de cuenta {}", request.getAmount(), accountId);

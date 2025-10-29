@@ -1,6 +1,8 @@
 package com.example.banking.infrastructure.axon.config;
 
+import com.example.banking.infrastructure.kafka.bus.KafkaEventBus;
 import com.example.banking.infrastructure.kafka.gateway.KafkaCommandGateway;
+import com.example.banking.infrastructure.kafka.storage.KafkaEventStorageEngine;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.commandhandling.SimpleCommandBus;
@@ -10,7 +12,6 @@ import org.axonframework.common.transaction.TransactionManager;
 import org.axonframework.config.EventProcessingConfigurer;
 import org.axonframework.eventsourcing.EventSourcingRepository;
 import org.axonframework.eventsourcing.eventstore.EventStore;
-import org.axonframework.eventsourcing.eventstore.jpa.JpaEventStorageEngine;
 import org.axonframework.messaging.interceptors.BeanValidationInterceptor;
 import org.axonframework.messaging.interceptors.LoggingInterceptor;
 import org.axonframework.modelling.command.Repository;
@@ -21,33 +22,27 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 /**
- * Configuración de Axon Framework con CommandBus personalizado usando Kafka
- * y EventStore con PostgreSQL
+ * Configuración de Axon Framework con:
+ * - CommandBus usando Kafka
+ * - EventStore híbrido (PostgreSQL + Kafka)
  */
 @Slf4j
 @Configuration
 public class AxonConfig {
 
-    /**
-     * CommandBus local que procesa los comandos en esta instancia
-     */
     @Bean
     @Primary
     public CommandBus localCommandBus() {
         SimpleCommandBus commandBus = SimpleCommandBus.builder().build();
         
-        // Registrar interceptores
         commandBus.registerDispatchInterceptor(new BeanValidationInterceptor<>());
         commandBus.registerDispatchInterceptor(new LoggingInterceptor<>());
         commandBus.registerHandlerInterceptor(new LoggingInterceptor<>());
         
-        log.info("CommandBus local configurado con interceptores");
+        log.info("CommandBus local configurado");
         return commandBus;
     }
 
-    /**
-     * CommandGateway principal que usa Kafka para enviar comandos
-     */
     @Bean
     @Primary
     public CommandGateway commandGateway(KafkaCommandGateway kafkaCommandGateway) {
@@ -56,30 +51,28 @@ public class AxonConfig {
     }
 
     /**
-     * EventStorageEngine con JPA y PostgreSQL
+     * EventStorageEngine híbrido: PostgreSQL + Kafka
      */
     @Bean
-    public JpaEventStorageEngine eventStorageEngine(
-            Serializer serializer,
+    public KafkaEventStorageEngine eventStorageEngine(
+            Serializer defaultSerializer,
             EntityManagerProvider entityManagerProvider,
-            TransactionManager transactionManager) {
+            TransactionManager transactionManager,
+            KafkaEventBus kafkaEventBus) {
         
-        log.info("Configurando JpaEventStorageEngine con PostgreSQL");
+        log.info("Configurando KafkaEventStorageEngine (PostgreSQL + Kafka)");
         
-        return JpaEventStorageEngine.builder()
-                .snapshotSerializer(serializer)
-                .eventSerializer(serializer)
+        return KafkaEventStorageEngine.builder()
+                .snapshotSerializer(defaultSerializer)
+                .eventSerializer(defaultSerializer)
                 .entityManagerProvider(entityManagerProvider)
                 .transactionManager(transactionManager)
+                .kafkaEventBus(kafkaEventBus)
                 .build();
     }
 
-    /**
-     * Configuración de procesamiento de eventos
-     */
     @Autowired
     public void configureEventProcessing(EventProcessingConfigurer configurer) {
-        // Configurar procesadores de eventos si es necesario
         configurer.registerDefaultListenerInvocationErrorHandler(
                 configuration -> (exception, event, eventHandler) -> {
                     log.error("Error procesando evento: {}", event, exception);
@@ -89,9 +82,6 @@ public class AxonConfig {
         log.info("Configuración de procesamiento de eventos completada");
     }
 
-    /**
-     * Repository para BankAccountAggregate
-     */
     @Bean
     public Repository<com.example.banking.aggregate.BankAccountAggregate> bankAccountRepository(
             EventStore eventStore) {

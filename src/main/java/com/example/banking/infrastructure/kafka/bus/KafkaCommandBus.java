@@ -14,11 +14,13 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.Nonnull;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * CommandBus personalizado que consume comandos desde Kafka y los procesa
- * usando el CommandBus local de Axon Framework.
+ * CommandBus que consume comandos desde Kafka y los despacha a handlers registrados.
+ * Implementa registro dinámico de handlers por tipo de comando.
  */
 @Slf4j
 @Component
@@ -26,6 +28,7 @@ public class KafkaCommandBus {
 
     private final CommandBus localCommandBus;
     private final CommandSerializer commandSerializer;
+    private final Map<String, List<MessageHandler<? super CommandMessage<?>>>> handlers;
     private final List<MessageHandlerInterceptor<? super CommandMessage<?>>> handlerInterceptors;
 
     public KafkaCommandBus(
@@ -33,7 +36,37 @@ public class KafkaCommandBus {
             CommandSerializer commandSerializer) {
         this.localCommandBus = localCommandBus;
         this.commandSerializer = commandSerializer;
+        this.handlers = new ConcurrentHashMap<>();
         this.handlerInterceptors = new CopyOnWriteArrayList<>();
+    }
+
+    /**
+     * Registra un handler para un tipo específico de comando.
+     * Este método permite que los aggregates se registren dinámicamente.
+     */
+    public org.axonframework.common.Registration subscribe(
+            @Nonnull String commandName,
+            @Nonnull MessageHandler<? super CommandMessage<?>> handler) {
+        
+        log.info("Registrando handler para comando: {}", commandName);
+        
+        handlers.computeIfAbsent(commandName, k -> new CopyOnWriteArrayList<>()).add(handler);
+        
+        // También registrar en el CommandBus local
+        org.axonframework.common.Registration localRegistration = 
+            localCommandBus.subscribe(commandName, handler);
+        
+        // Retornar Registration que elimina de ambos lugares
+        return () -> {
+            List<MessageHandler<? super CommandMessage<?>>> commandHandlers = handlers.get(commandName);
+            if (commandHandlers != null) {
+                commandHandlers.remove(handler);
+                if (commandHandlers.isEmpty()) {
+                    handlers.remove(commandName);
+                }
+            }
+            return localRegistration.cancel();
+        };
     }
 
     /**
@@ -46,83 +79,59 @@ public class KafkaCommandBus {
     )
     public void consumeCommand(ConsumerRecord<String, String> record, Acknowledgment acknowledgment) {
         try {
-            log.info("Comando recibido de Kafka - Key: {}, Partition: {}, Offset: {}", 
+            log.info("Comando recibido - Key: {}, Partition: {}, Offset: {}", 
                     record.key(), record.partition(), record.offset());
             
-            // Deserializar el comando
             String commandJson = record.value();
             CommandMessage<?> commandMessage = commandSerializer.deserialize(commandJson);
             
             log.debug("Comando deserializado: {}", commandMessage.getPayloadType().getSimpleName());
             
-            // Procesar el comando usando el CommandBus local
+            // Procesar usando el CommandBus local
             processCommand(commandMessage);
             
-            // Confirmar el procesamiento
             if (acknowledgment != null) {
                 acknowledgment.acknowledge();
                 log.debug("Comando confirmado en Kafka");
             }
             
         } catch (Exception e) {
-            log.error("Error al procesar comando de Kafka: {}", record.value(), e);
-            // En caso de error, no hacer acknowledge para que el mensaje se reprocese
-            // O podrías enviarlo a un DLQ (Dead Letter Queue)
+            log.error("Error procesando comando de Kafka: {}", record.value(), e);
+            // No hacer acknowledge para reprocesar
         }
     }
 
-    /**
-     * Procesa un comando usando el CommandBus local de Axon
-     */
     private void processCommand(CommandMessage<?> commandMessage) {
         try {
             log.info("Procesando comando: {}", commandMessage.getPayloadType().getSimpleName());
             
-            // Enviar el comando al CommandBus local para que sea procesado por el Aggregate
             localCommandBus.dispatch(commandMessage, new CommandCallback<Object, Object>() {
                 @Override
                 public void onResult(@Nonnull CommandMessage<?> commandMessage, 
-                                     @Nonnull org.axonframework.commandhandling.CommandResultMessage<?> commandResultMessage) {
-                    if (commandResultMessage.isExceptional()) {
-                        log.error("Error al procesar comando: {}", 
+                                     @Nonnull org.axonframework.commandhandling.CommandResultMessage<?> result) {
+                    if (result.isExceptional()) {
+                        log.error("Error procesando comando: {}", 
                                 commandMessage.getPayloadType().getSimpleName(),
-                                commandResultMessage.exceptionResult());
+                                result.exceptionResult());
                     } else {
-                        log.info("Comando procesado exitosamente: {} - Resultado: {}", 
-                                commandMessage.getPayloadType().getSimpleName(),
-                                commandResultMessage.getPayload());
+                        log.info("Comando procesado exitosamente: {}", 
+                                commandMessage.getPayloadType().getSimpleName());
                     }
                 }
             });
             
         } catch (Exception e) {
-            log.error("Error al despachar comando al CommandBus local", e);
+            log.error("Error despachando comando al CommandBus local", e);
             throw e;
         }
     }
 
-    /**
-     * Registra un handler para comandos específicos (delegado al CommandBus local)
-     */
-    public org.axonframework.common.Registration subscribe(
-            @Nonnull String commandName,
-            @Nonnull MessageHandler<? super CommandMessage<?>> handler) {
-        log.info("Registrando handler para comando: {}", commandName);
-        return localCommandBus.subscribe(commandName, handler);
-    }
-
-    /**
-     * Registra un interceptor de handlers
-     */
     public org.axonframework.common.Registration registerHandlerInterceptor(
             @Nonnull MessageHandlerInterceptor<? super CommandMessage<?>> handlerInterceptor) {
         handlerInterceptors.add(handlerInterceptor);
         return () -> handlerInterceptors.remove(handlerInterceptor);
     }
 
-    /**
-     * Registra un interceptor de dispatch (delegado al CommandBus local)
-     */
     public org.axonframework.common.Registration registerDispatchInterceptor(
             @Nonnull org.axonframework.messaging.MessageDispatchInterceptor<? super CommandMessage<?>> dispatchInterceptor) {
         return localCommandBus.registerDispatchInterceptor(dispatchInterceptor);

@@ -2,6 +2,7 @@ package com.example.banking.infrastructure.axon.config;
 
 import com.example.banking.infrastructure.kafka.bus.KafkaEventBus;
 import com.example.banking.infrastructure.kafka.gateway.KafkaCommandGateway;
+import com.example.banking.infrastructure.kafka.storage.EventStoreMaterializer;
 import com.example.banking.infrastructure.kafka.storage.KafkaEventStorageEngine;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandBus;
@@ -24,7 +25,7 @@ import org.springframework.context.annotation.Primary;
 /**
  * Configuración de Axon Framework con:
  * - CommandBus usando Kafka
- * - EventStore híbrido (PostgreSQL + Kafka)
+ * - EventStore híbrido (Kafka source of truth + PostgreSQL cache lazy-load)
  */
 @Slf4j
 @Configuration
@@ -51,16 +52,17 @@ public class AxonConfig {
     }
 
     /**
-     * EventStorageEngine híbrido: PostgreSQL + Kafka
+     * EventStorageEngine híbrido: Kafka (source of truth) + PostgreSQL (cache lazy-load)
      */
     @Bean
     public KafkaEventStorageEngine eventStorageEngine(
             Serializer defaultSerializer,
             EntityManagerProvider entityManagerProvider,
             TransactionManager transactionManager,
-            KafkaEventBus kafkaEventBus) {
+            KafkaEventBus kafkaEventBus,
+            EventStoreMaterializer materializer) {
         
-        log.info("Configurando KafkaEventStorageEngine (PostgreSQL + Kafka)");
+        log.info("Configurando KafkaEventStorageEngine (Kafka source of truth + PG lazy-load)");
         
         return KafkaEventStorageEngine.builder()
                 .snapshotSerializer(defaultSerializer)
@@ -68,6 +70,7 @@ public class AxonConfig {
                 .entityManagerProvider(entityManagerProvider)
                 .transactionManager(transactionManager)
                 .kafkaEventBus(kafkaEventBus)
+                .materializer(materializer)
                 .build();
     }
 

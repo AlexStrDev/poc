@@ -1,5 +1,6 @@
 package com.example.banking.infrastructure.kafka.gateway;
 
+import com.example.banking.infrastructure.kafka.handler.CommandReplyHandler;
 import com.example.banking.infrastructure.kafka.serializer.CommandSerializer;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandCallback;
@@ -14,11 +15,19 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
 
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * CommandGateway personalizado que envía comandos a Kafka en lugar de Axon Server.
+ * CommandGateway mejorado con patrón Request-Reply.
+ * 
+ * Mejoras:
+ * ✅ Correlation ID para tracking de respuestas
+ * ✅ Respuestas reales desde el consumer (no simuladas)
+ * ✅ Timeout configurable
+ * ✅ Métricas de comandos enviados
  */
 @Slf4j
 @Component
@@ -26,24 +35,41 @@ public class KafkaCommandGateway implements CommandGateway {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final CommandSerializer commandSerializer;
+    private final CommandReplyHandler replyHandler;
     private final String commandTopic;
+    private final long defaultTimeoutSeconds;
+
+    // Métricas
+    private long sentCommands = 0;
+    private long failedSends = 0;
 
     public KafkaCommandGateway(
             KafkaTemplate<String, String> kafkaTemplate,
             CommandSerializer commandSerializer,
-            @Value("${kafka.command.topic}") String commandTopic) {
+            CommandReplyHandler replyHandler,
+            @Value("${kafka.command.topic}") String commandTopic,
+            @Value("${kafka.command.timeout.seconds:30}") long defaultTimeoutSeconds) {
+        
         this.kafkaTemplate = kafkaTemplate;
         this.commandSerializer = commandSerializer;
+        this.replyHandler = replyHandler;
         this.commandTopic = commandTopic;
+        this.defaultTimeoutSeconds = defaultTimeoutSeconds;
     }
 
     @Override
     public <C, R> void send(C command, CommandCallback<? super C, ? super R> callback) {
         try {
-            log.info("Enviando comando: {} al tópico: {}", command.getClass().getSimpleName(), commandTopic);
+            log.info("📤 Enviando comando: {} al tópico: {}", 
+                command.getClass().getSimpleName(), commandTopic);
             
-            // Crear CommandMessage
-            CommandMessage<C> commandMessage = GenericCommandMessage.asCommandMessage(command);
+            // Generar correlationId único
+            String correlationId = UUID.randomUUID().toString();
+            
+            // Crear CommandMessage con correlationId
+            @SuppressWarnings("unchecked")
+            CommandMessage<C> commandMessage = (CommandMessage<C>) GenericCommandMessage.asCommandMessage(command)
+                .andMetaData(Map.of("correlationId", correlationId));
             
             // Extraer routing key
             String routingKey = commandSerializer.extractRoutingKey(commandMessage);
@@ -51,39 +77,62 @@ public class KafkaCommandGateway implements CommandGateway {
             // Serializar el comando
             String serializedCommand = commandSerializer.serialize(commandMessage, routingKey);
             
+            // Registrar comando esperando respuesta
+            CompletableFuture<CommandReplyHandler.CommandResult> replyFuture = 
+                replyHandler.registerPendingCommand(correlationId);
+            
             // Enviar a Kafka
-            CompletableFuture<SendResult<String, String>> future = 
+            CompletableFuture<SendResult<String, String>> sendFuture = 
                     kafkaTemplate.send(commandTopic, routingKey, serializedCommand);
             
-            // Manejar el resultado del envío
-            future.whenComplete((result, throwable) -> {
+            // Manejar resultado del envío
+            sendFuture.whenComplete((result, throwable) -> {
                 if (throwable != null) {
-                    log.error("Error al enviar comando a Kafka", throwable);
+                    log.error("❌ Error al enviar comando a Kafka", throwable);
+                    failedSends++;
+                    
                     if (callback != null) {
                         callback.onResult(commandMessage, 
                                 GenericCommandResultMessage.asCommandResultMessage(throwable));
                     }
-                } else {
-                    log.info("Comando enviado exitosamente. Offset: {}, Partition: {}", 
-                            result.getRecordMetadata().offset(),
-                            result.getRecordMetadata().partition());
                     
-                    // Para comandos que esperan respuesta
+                    replyFuture.completeExceptionally(throwable);
+                } else {
+                    sentCommands++;
+                    log.info("✅ Comando enviado exitosamente. Offset: {}, Partition: {}, CorrelationId: {}", 
+                            result.getRecordMetadata().offset(),
+                            result.getRecordMetadata().partition(),
+                            correlationId);
+                    
+                    // Esperar respuesta del consumer
                     if (callback != null) {
-                        // Simulamos una respuesta exitosa inmediata
-                        // En producción, implementar mecanismo de respuesta real
-                        CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() -> {
+                        replyFuture.thenAccept(commandResult -> {
+                            if (commandResult.isSuccess()) {
+                                @SuppressWarnings("unchecked")
+                                R commandPayload = (R) commandResult.getResult();
+                                callback.onResult(commandMessage, 
+                                    GenericCommandResultMessage.asCommandResultMessage(commandPayload));
+                            } else {
+                                callback.onResult(commandMessage, 
+                                    GenericCommandResultMessage.asCommandResultMessage(
+                                        new CommandExecutionException(commandResult.getErrorMessage())));
+                            }
+                        }).exceptionally(ex -> {
                             callback.onResult(commandMessage, 
-                                    GenericCommandResultMessage.asCommandResultMessage("Command processed"));
+                                GenericCommandResultMessage.asCommandResultMessage(ex));
+                            return null;
                         });
                     }
                 }
             });
             
         } catch (Exception e) {
-            log.error("Error al enviar comando", e);
+            log.error("💥 Error al enviar comando", e);
+            failedSends++;
+            
             if (callback != null) {
-                CommandMessage<C> commandMessage = GenericCommandMessage.asCommandMessage(command);
+                @SuppressWarnings("unchecked")
+                CommandMessage<C> commandMessage = (CommandMessage<C>) GenericCommandMessage.asCommandMessage(command);
                 callback.onResult(commandMessage, GenericCommandResultMessage.asCommandResultMessage(e));
             }
         }
@@ -91,7 +140,7 @@ public class KafkaCommandGateway implements CommandGateway {
 
     @Override
     public <R> R sendAndWait(Object command) {
-        return sendAndWait(command, 10, TimeUnit.SECONDS);
+        return sendAndWait(command, defaultTimeoutSeconds, TimeUnit.SECONDS);
     }
 
     @Override
@@ -140,7 +189,27 @@ public class KafkaCommandGateway implements CommandGateway {
     public Registration registerDispatchInterceptor(
             MessageDispatchInterceptor<? super CommandMessage<?>> dispatchInterceptor) {
         log.warn("registerDispatchInterceptor no está completamente implementado en KafkaCommandGateway");
-        // Retornar un Registration vacío
         return () -> true;
+    }
+
+    /**
+     * Obtiene métricas del gateway
+     */
+    public Map<String, Object> getMetrics() {
+        return Map.of(
+            "sentCommands", sentCommands,
+            "failedSends", failedSends,
+            "successRate", sentCommands > 0 ? 
+                (sentCommands - failedSends) * 100.0 / sentCommands : 0
+        );
+    }
+
+    /**
+     * Excepción para errores de ejecución de comandos
+     */
+    public static class CommandExecutionException extends RuntimeException {
+        public CommandExecutionException(String message) {
+            super(message);
+        }
     }
 }

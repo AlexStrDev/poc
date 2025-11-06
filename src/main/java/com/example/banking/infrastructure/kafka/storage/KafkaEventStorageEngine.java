@@ -1,6 +1,7 @@
 package com.example.banking.infrastructure.kafka.storage;
 
 import com.example.banking.infrastructure.kafka.bus.KafkaEventBus;
+import com.example.banking.infrastructure.lock.DistributedLockService;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.common.jpa.EntityManagerProvider;
 import org.axonframework.common.transaction.TransactionManager;
@@ -11,87 +12,140 @@ import org.axonframework.eventsourcing.eventstore.jpa.JpaEventStorageEngine;
 import org.axonframework.serialization.Serializer;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
- * EventStorageEngine híbrido con Kafka como source of truth:
- * - Kafka: Event store principal (durabilidad)
- * - PostgreSQL: Cache materializado (performance, lazy-load)
+ * EventStorageEngine híbrido mejorado:
  * 
- * Flujo:
- * 1. appendEvents() → Kafka PRIMERO → PostgreSQL después (async)
- * 2. readEventData() → Verificar PG → Si no existe, reconstruir desde Kafka
+ * ESCRITURA (appendEvents):
+ * ✅ Kafka ÚNICAMENTE (source of truth, rápido, durabilidad garantizada)
+ * ✅ PostgreSQL materializado ASÍNCRONAMENTE por consumer separado
+ * 
+ * LECTURA (readEventData):
+ * ✅ PostgreSQL primero (cache, performance)
+ * ✅ Si no existe, trigger materialización asíncrona y leer desde Kafka
+ * ✅ Lock distribuido para evitar materialización concurrente
+ * 
+ * Ventajas:
+ * - Comandos rápidos (solo escriben a Kafka)
+ * - PostgreSQL puede reconstruirse completamente desde Kafka
+ * - Tolerante a fallos de PostgreSQL
  */
 @Slf4j
 public class KafkaEventStorageEngine extends JpaEventStorageEngine {
 
     private final KafkaEventBus kafkaEventBus;
     private final EventStoreMaterializer materializer;
+    private final DistributedLockService lockService;
 
     protected KafkaEventStorageEngine(Builder builder) {
         super(builder);
         this.kafkaEventBus = builder.kafkaEventBus;
         this.materializer = builder.materializer;
+        this.lockService = builder.lockService;
     }
 
+    /**
+     * ✅ MEJORADO: Publica SOLO a Kafka (source of truth)
+     * 
+     * PostgreSQL se materializa asíncronamente por EventMaterializationConsumer.
+     * Esto hace que los comandos sean ultrarrápidos.
+     */
     @Override
     protected void appendEvents(List<? extends EventMessage<?>> events, Serializer serializer) {
-        log.debug("Persistiendo {} eventos - Kafka PRIMERO", events.size());
+        log.debug("📝 Persistiendo {} eventos - Kafka ÚNICAMENTE (source of truth)", events.size());
         
+        // Publicar a Kafka (CRÍTICO: Si falla, el comando debe fallar)
         events.stream()
             .filter(event -> event instanceof DomainEventMessage)
             .map(event -> (DomainEventMessage<?>) event)
             .forEach(event -> {
                 try {
                     kafkaEventBus.publish(event);
-                    log.debug("Evento publicado en Kafka (source of truth): {}", 
-                        event.getPayloadType().getSimpleName());
+                    log.debug("✅ Evento publicado en Kafka: {} seq={}", 
+                        event.getAggregateIdentifier(), event.getSequenceNumber());
                 } catch (Exception e) {
-                    log.error("CRÍTICO: Error publicando evento a Kafka", e);
+                    log.error("💥 CRÍTICO: Error publicando evento a Kafka", e);
                     throw new RuntimeException("No se pudo persistir en Kafka (source of truth)", e);
                 }
             });
         
-        try {
-            super.appendEvents(events, serializer);
-            
-            if (!events.isEmpty() && events.get(0) instanceof DomainEventMessage) {
-                DomainEventMessage<?> firstEvent = (DomainEventMessage<?>) events.get(0);
-                materializer.markAsMaterialized(firstEvent.getAggregateIdentifier());
-            }
-            
-            log.debug("Eventos persistidos en PostgreSQL (cache)");
-        } catch (Exception e) {
-            log.warn("Error persistiendo en PostgreSQL (no crítico, está en Kafka): {}", e.getMessage());
-        }
+        // NO llamar a super.appendEvents() aquí
+        // PostgreSQL se materializa asíncronamente por EventMaterializationConsumer
+        
+        log.info("✅ {} eventos publicados exitosamente a Kafka (source of truth)", events.size());
     }
 
+    /**
+     * ✅ MEJORADO: Lee desde PG si existe, sino trigger materialización asíncrona
+     * 
+     * Flujo optimizado:
+     * 1. Verificar si existe en PG (cache hit = rápido)
+     * 2. Si no existe, verificar con lock distribuido
+     * 3. Materializar desde Kafka con lock (evita duplicación)
+     * 4. Leer desde PG
+     */
     @Override
-    protected Stream<? extends DomainEventData<?>> readEventData(String aggregateIdentifier, long firstSequenceNumber) {
-        log.debug("Leyendo eventos para aggregate: {}", aggregateIdentifier);
+    protected Stream<? extends DomainEventData<?>> readEventData(
+            String aggregateIdentifier, long firstSequenceNumber) {
         
+        log.debug("📖 Leyendo eventos: aggregate={}, desde seq={}", 
+            aggregateIdentifier, firstSequenceNumber);
+        
+        // 1. Intentar leer desde PostgreSQL (cache hit)
         if (materializer.isMaterialized(aggregateIdentifier)) {
-            log.debug("Aggregate {} encontrado en PG (cache hit)", aggregateIdentifier);
+            log.debug("✅ Cache hit: Aggregate {} encontrado en PostgreSQL", aggregateIdentifier);
             return super.readEventData(aggregateIdentifier, firstSequenceNumber);
         }
         
-        log.info("Aggregate {} NO encontrado en PG - Reconstruyendo desde Kafka (lazy-load)", 
+        // 2. Cache miss: Materializar desde Kafka con lock distribuido
+        log.info("⚠️ Cache miss: Aggregate {} NO en PG - Materializando desde Kafka...", 
             aggregateIdentifier);
         
+        String lockKey = "materialize:" + aggregateIdentifier;
+        
         try {
-            materializer.materializeFromKafka(aggregateIdentifier);
+            // Intentar adquirir lock (timeout 30s)
+            boolean executed = lockService.executeWithLock(
+                lockKey, 
+                30, 
+                TimeUnit.SECONDS,
+                () -> {
+                    // Verificar nuevamente por si otro thread ya materializó
+                    if (!materializer.isMaterialized(aggregateIdentifier)) {
+                        log.info("🔄 Materializando aggregate {} desde Kafka...", aggregateIdentifier);
+                        materializer.materializeFromKafka(aggregateIdentifier);
+                        log.info("✅ Aggregate {} materializado desde Kafka", aggregateIdentifier);
+                    } else {
+                        log.debug("✅ Aggregate {} ya fue materializado por otro thread", 
+                            aggregateIdentifier);
+                    }
+                }
+            );
             
+            if (!executed) {
+                log.warn("⚠️ Timeout adquiriendo lock para materializar aggregate {}", 
+                    aggregateIdentifier);
+                throw new RuntimeException("Timeout materializando aggregate desde Kafka");
+            }
+            
+            // 3. Leer desde PostgreSQL (ahora debe estar materializado)
             return super.readEventData(aggregateIdentifier, firstSequenceNumber);
             
         } catch (Exception e) {
-            log.error("Error materializando aggregate desde Kafka", e);
+            log.error("💥 Error materializando aggregate desde Kafka", e);
             throw new RuntimeException("No se pudo reconstruir aggregate desde Kafka", e);
         }
     }
 
+    /**
+     * Snapshots se guardan solo en PostgreSQL (optimización)
+     */
     @Override
     protected void storeSnapshot(DomainEventMessage<?> snapshot, Serializer serializer) {
-        log.debug("Guardando snapshot para agregado: {}", snapshot.getAggregateIdentifier());
+        log.debug("📸 Guardando snapshot: aggregate={}, seq={}", 
+            snapshot.getAggregateIdentifier(), snapshot.getSequenceNumber());
         super.storeSnapshot(snapshot, serializer);
     }
 
@@ -102,6 +156,7 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
     public static class Builder extends JpaEventStorageEngine.Builder {
         private KafkaEventBus kafkaEventBus;
         private EventStoreMaterializer materializer;
+        private DistributedLockService lockService;
 
         @Override
         public Builder snapshotSerializer(Serializer snapshotSerializer) {
@@ -122,7 +177,8 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
         }
 
         @Override
-        public Builder persistenceExceptionResolver(org.axonframework.common.jdbc.PersistenceExceptionResolver persistenceExceptionResolver) {
+        public Builder persistenceExceptionResolver(
+                org.axonframework.common.jdbc.PersistenceExceptionResolver persistenceExceptionResolver) {
             super.persistenceExceptionResolver(persistenceExceptionResolver);
             return this;
         }
@@ -155,8 +211,22 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
             return this;
         }
 
+        public Builder lockService(DistributedLockService lockService) {
+            this.lockService = lockService;
+            return this;
+        }
+
         @Override
         public KafkaEventStorageEngine build() {
+            if (kafkaEventBus == null) {
+                throw new IllegalStateException("KafkaEventBus no puede ser null");
+            }
+            if (materializer == null) {
+                throw new IllegalStateException("EventStoreMaterializer no puede ser null");
+            }
+            if (lockService == null) {
+                throw new IllegalStateException("DistributedLockService no puede ser null");
+            }
             return new KafkaEventStorageEngine(this);
         }
     }

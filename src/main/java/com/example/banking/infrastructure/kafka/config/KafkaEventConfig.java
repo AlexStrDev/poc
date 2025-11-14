@@ -5,6 +5,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -40,6 +41,7 @@ public class KafkaEventConfig {
     }
 
     @Bean
+    @Qualifier("eventConsumerFactory")
     public ConsumerFactory<String, String> eventConsumerFactory() {
         Map<String, Object> configProps = new HashMap<>();
         configProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -54,10 +56,11 @@ public class KafkaEventConfig {
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> eventKafkaListenerContainerFactory() {
+    public ConcurrentKafkaListenerContainerFactory<String, String> eventKafkaListenerContainerFactory(
+            @Qualifier("eventConsumerFactory") ConsumerFactory<String, String> eventConsumerFactory) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory = 
                 new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(eventConsumerFactory());
+        factory.setConsumerFactory(eventConsumerFactory);
         factory.setConcurrency(3);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
         

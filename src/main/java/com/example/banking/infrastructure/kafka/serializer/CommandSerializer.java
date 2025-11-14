@@ -34,7 +34,7 @@ public class CommandSerializer {
         try {
             String messageId = commandMessage.getIdentifier();
             String commandName = commandMessage.getPayloadType().getName();
-            long timestamp = System.currentTimeMillis(); // Usar timestamp actual
+            long timestamp = System.currentTimeMillis();
             
             // Serializar el payload
             Object payload = commandMessage.getPayload();
@@ -71,6 +71,8 @@ public class CommandSerializer {
 
     /**
      * Deserializa un JSON de Kafka a CommandMessage de Axon
+     * 
+     * ✅ CORREGIDO: Preserva TODOS los metadatos incluyendo correlationId
      */
     public CommandMessage<?> deserialize(String json) {
         try {
@@ -85,14 +87,17 @@ public class CommandSerializer {
                     payloadType
             );
             
-            // Convertir metadata
-            MetaData metaData = MetaData.from(serializedCommand.getMetaData());
+            // ✅ CORREGIDO: Combinar TODOS los metadatos en lugar de reemplazarlos
+            Map<String, Object> allMetaData = new HashMap<>(serializedCommand.getMetaData());
+            allMetaData.put("messageIdentifier", serializedCommand.getMessageIdentifier());
             
-            // Crear el CommandMessage
-            return new GenericCommandMessage<>(
-                    payload,
-                    metaData
-            ).withMetaData(Map.of("messageIdentifier", serializedCommand.getMessageIdentifier()));
+            MetaData metaData = MetaData.from(allMetaData);
+            
+            log.debug("✅ Metadata deserializado: {}", allMetaData);
+            log.debug("✅ CorrelationId extraído: {}", allMetaData.get("correlationId"));
+            
+            // Crear el CommandMessage con TODO el metadata preservado
+            return new GenericCommandMessage<>(payload, metaData);
             
         } catch (Exception e) {
             log.error("Error al deserializar comando: {}", json, e);

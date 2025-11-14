@@ -5,6 +5,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -61,6 +62,7 @@ public class KafkaCommandConfig {
      * Configuración del Consumer para recibir comandos
      */
     @Bean
+    @Qualifier("commandConsumerFactory")
     public ConsumerFactory<String, String> commandConsumerFactory() {
         Map<String, Object> configProps = new HashMap<>();
         configProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -81,10 +83,11 @@ public class KafkaCommandConfig {
      * Container Factory para el listener de comandos con confirmación manual
      */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory() {
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
+            @Qualifier("commandConsumerFactory") ConsumerFactory<String, String> commandConsumerFactory) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory = 
                 new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(commandConsumerFactory());
+        factory.setConsumerFactory(commandConsumerFactory);
         factory.setConcurrency(concurrency);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
         factory.getContainerProperties().setSyncCommits(true);

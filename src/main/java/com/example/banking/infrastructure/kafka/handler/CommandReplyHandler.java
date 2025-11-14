@@ -74,32 +74,38 @@ public class CommandReplyHandler {
             Acknowledgment acknowledgment) {
         
         try {
-            log.debug("Respuesta de comando recibida - Key: {}", record.key());
+            log.info("📨 Respuesta recibida del tópico '{}' - Key: {}", 
+                record.topic(), record.key());
+            log.debug("📨 Valor recibido: {}", record.value());
             
             CommandResult result = objectMapper.readValue(record.value(), CommandResult.class);
+            
+            log.info("🔍 Procesando respuesta para correlationId: {}", result.getCorrelationId());
+            log.debug("📊 Comandos pendientes actuales: {}", pendingCommands.keySet());
             
             CompletableFuture<CommandResult> future = pendingCommands.remove(result.getCorrelationId());
             
             if (future != null) {
                 if (result.isSuccess()) {
                     future.complete(result);
-                    log.info("Comando completado exitosamente: {}", result.getCorrelationId());
+                    log.info("✅ Comando completado exitosamente: {}", result.getCorrelationId());
                 } else {
                     future.completeExceptionally(
                         new CommandExecutionException(result.getErrorMessage())
                     );
-                    log.warn("Comando falló: {} - Error: {}", 
+                    log.warn("⚠️ Comando falló: {} - Error: {}", 
                         result.getCorrelationId(), result.getErrorMessage());
                 }
             } else {
-                log.warn("Respuesta recibida para comando no registrado o expirado: {}", 
+                log.warn("⚠️ Respuesta recibida para comando no registrado o ya expirado: {}", 
                     result.getCorrelationId());
             }
             
             acknowledgment.acknowledge();
+            log.debug("✅ Respuesta confirmada en Kafka");
             
         } catch (Exception e) {
-            log.error("Error procesando respuesta de comando", e);
+            log.error("💥 Error procesando respuesta de comando: {}", record.value(), e);
             acknowledgment.acknowledge(); // Acknowledge para no bloquear
         }
     }

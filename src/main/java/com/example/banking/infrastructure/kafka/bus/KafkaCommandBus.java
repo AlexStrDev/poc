@@ -223,7 +223,8 @@ public class KafkaCommandBus {
      */
     private void sendReply(String correlationId, boolean success, String message) {
         if (correlationId == null) {
-            return; // No hay correlationId, no se espera respuesta
+            log.warn("⚠️ No hay correlationId para enviar respuesta");
+            return;
         }
         
         try {
@@ -234,11 +235,24 @@ public class KafkaCommandBus {
             String resultJson = new com.fasterxml.jackson.databind.ObjectMapper()
                 .writeValueAsString(result);
             
-            kafkaTemplate.send(replyTopic, correlationId, resultJson);
-            log.debug("📤 Respuesta enviada: correlationId={}, success={}", correlationId, success);
+            log.info("📤 Preparando envío de respuesta: correlationId={}, success={}, tópico='{}'", 
+                correlationId, success, replyTopic);
+            log.debug("📤 JSON de respuesta: {}", resultJson);
+            
+            // ✅ IMPORTANTE: Esperar confirmación de envío para debugging
+            kafkaTemplate.send(replyTopic, correlationId, resultJson)
+                .whenComplete((sendResult, exception) -> {
+                    if (exception != null) {
+                        log.error("❌ CRÍTICO: Error enviando respuesta a Kafka", exception);
+                    } else {
+                        log.info("✅ Respuesta enviada exitosamente a Kafka - Offset: {}, Partition: {}", 
+                            sendResult.getRecordMetadata().offset(),
+                            sendResult.getRecordMetadata().partition());
+                    }
+                });
             
         } catch (Exception e) {
-            log.error("Error enviando respuesta de comando", e);
+            log.error("💥 Error serializando o enviando respuesta de comando", e);
         }
     }
 
